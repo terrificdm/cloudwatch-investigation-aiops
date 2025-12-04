@@ -156,8 +156,6 @@ EC2 实例（运行 stress-ng 压测）
 - SSM Automation 建议可能不会自动显示（取决于 AI 分析）
 - 如果没有 SSM 建议，使用 `./scenarios/stop-stress.sh` 手动停止
 
----
-
 ### 场景2: Lambda 慢查询
 
 **时长**: 5分钟  
@@ -209,8 +207,6 @@ EC2 实例（运行 stress-ng 压测）
 - 数据库查询延迟: 25 秒（接近超时，触发告警）
 - X-Ray 显示完整调用链
 - Investigation 自动关联所有信号
-
----
 
 ---
 
