@@ -88,7 +88,7 @@ EC2 实例（运行 stress-ng 压测）
 #    - 创建/检测 Investigation Group
 #    - 配置 Investigation Group 资源策略
 #    - 配置场景1的 EC2 CPU 告警自动触发 Investigation
-#    - 场景2和3保持手动启动
+#    - 场景2保持手动启动
 
 # 3. 验证部署（可选）
 ./verify-deployment.sh
@@ -104,7 +104,7 @@ EC2 实例（运行 stress-ng 压测）
 **重要说明**：
 - `setup-investigation.sh` 必须在 `deploy.sh` 之后运行
 - 它会配置场景1的告警自动触发 Investigation
-- 场景2和3需要从控制台手动启动 Investigation
+- 场景2需要从控制台手动启动 Investigation
 - Investigation Group 每个 Region 只能有一个，脚本会自动检测并使用现有的
 
 ### 清理资源
