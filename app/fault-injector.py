@@ -3,15 +3,14 @@ import boto3
 import os
 
 ssm = boto3.client('ssm')
-ec2 = boto3.client('ec2')
 
 def lambda_handler(event, context):
     """
     Fault injector Lambda function
-    Triggers different failure scenarios for demo
+    Triggers slow query load for demo
     """
     
-    scenario = event.get('scenario', 'cpu-stress')
+    scenario = event.get('scenario', 'slow-query-load')
     instance_id = os.environ.get('EC2_INSTANCE_ID')
     
     if not instance_id:
@@ -21,12 +20,10 @@ def lambda_handler(event, context):
         }
     
     try:
-        if scenario == 'cpu-stress':
-            return trigger_cpu_stress(instance_id, event)
-        elif scenario == 'memory-leak':
-            return trigger_memory_leak(instance_id, event)
-        elif scenario == 'stop-stress':
-            return stop_stress(instance_id)
+        if scenario == 'slow-query-load':
+            return trigger_slow_query_load(instance_id, event)
+        elif scenario == 'stop-load':
+            return stop_load(instance_id)
         else:
             return {
                 'statusCode': 400,
@@ -39,24 +36,40 @@ def lambda_handler(event, context):
             'body': json.dumps({'error': str(e)})
         }
 
-def trigger_cpu_stress(instance_id, event):
-    """Trigger CPU stress test on EC2 instance"""
-    duration = event.get('duration', 300)  # Default 5 minutes
-    cpu_workers = event.get('cpu_workers', 0)  # 0 = all CPUs
+def trigger_slow_query_load(instance_id, event):
+    """Trigger slow query load on EC2 Flask application"""
+    duration = event.get('duration', 1800)  # Default 30 minutes
+    concurrent = event.get('concurrent', 150)  # Default 150 concurrent requests
     
     commands = [
         '#!/bin/bash',
-        'echo "Starting CPU stress test..."',
-        f'nohup stress-ng --cpu {cpu_workers} --timeout {duration}s --metrics-brief > /tmp/stress.log 2>&1 &',
-        'echo "Stress test started in background"',
-        'echo "PID: $(pgrep -f stress-ng)"'
+        'echo "Starting slow query load test..."',
+        'END_TIME=$(($(date +%s) + ' + str(duration) + '))',
+        '',
+        '# Function to start concurrent requests',
+        'start_requests() {',
+        f'  for i in {{1..{concurrent}}}; do',
+        '    curl -s http://localhost:5000/api/slow-query > /dev/null 2>&1 &',
+        '  done',
+        '}',
+        '',
+        '# Keep sending requests until duration expires',
+        'while [ $(date +%s) -lt $END_TIME ]; do',
+        '  start_requests',
+        f'  echo "Started {concurrent} concurrent slow queries at $(date)"',
+        '  sleep 35  # Wait slightly longer than query duration (30s) before next batch',
+        'done',
+        '',
+        'echo "Load test duration completed, waiting for remaining requests..."',
+        'wait',
+        'echo "Load test completed"'
     ]
     
     response = ssm.send_command(
         InstanceIds=[instance_id],
         DocumentName='AWS-RunShellScript',
         Parameters={'commands': commands},
-        Comment='Demo: Trigger CPU stress for CloudWatch Investigations'
+        Comment='Demo: Trigger slow query load for CloudWatch Investigations'
     )
     
     command_id = response['Command']['CommandId']
@@ -64,63 +77,34 @@ def trigger_cpu_stress(instance_id, event):
     return {
         'statusCode': 200,
         'body': json.dumps({
-            'message': 'CPU stress test triggered',
+            'message': 'Slow query load triggered',
             'instance_id': instance_id,
+            'concurrent': concurrent,
             'duration': duration,
             'command_id': command_id
         })
     }
 
-def trigger_memory_leak(instance_id, event):
-    """Trigger memory leak simulation on EC2 instance"""
-    duration = event.get('duration', 300)
-    memory_mb = event.get('memory_mb', 512)
-    
+def stop_load(instance_id):
+    """Stop slow query load on EC2 instance"""
     commands = [
         '#!/bin/bash',
-        'echo "Starting memory stress test..."',
-        f'nohup stress-ng --vm 1 --vm-bytes {memory_mb}M --timeout {duration}s > /tmp/stress-mem.log 2>&1 &',
-        'echo "Memory stress test started"',
-        'echo "PID: $(pgrep -f stress-ng)"'
+        'echo "Stopping slow query load..."',
+        'pkill -f "curl.*slow-query" || true',
+        'echo "Slow query load stopped"'
     ]
     
     response = ssm.send_command(
         InstanceIds=[instance_id],
         DocumentName='AWS-RunShellScript',
         Parameters={'commands': commands},
-        Comment='Demo: Trigger memory stress for CloudWatch Investigations'
+        Comment='Demo: Stop slow query load'
     )
     
     return {
         'statusCode': 200,
         'body': json.dumps({
-            'message': 'Memory stress test triggered',
-            'instance_id': instance_id,
-            'duration': duration,
-            'command_id': response['Command']['CommandId']
-        })
-    }
-
-def stop_stress(instance_id):
-    """Stop all stress tests on EC2 instance"""
-    commands = [
-        '#!/bin/bash',
-        'echo "Stopping all stress tests..."',
-        'pkill -9 -f stress-ng',
-        'echo "Stress tests stopped"'
-    ]
-    
-    response = ssm.send_command(
-        InstanceIds=[instance_id],
-        DocumentName='AWS-RunShellScript',
-        Parameters={'commands': commands},
-        Comment='Demo: Stop stress tests'
-    )
-    
-    return {
-        'statusCode': 200,
-        'body': json.dumps({
-            'message': 'Stress tests stopped',
+            'message': 'Slow query load stopped',
             'instance_id': instance_id,
             'command_id': response['Command']['CommandId']
         })

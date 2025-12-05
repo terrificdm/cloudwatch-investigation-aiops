@@ -90,32 +90,32 @@ aws aiops put-investigation-group-policy \
 echo -e "${GREEN}✓ Investigation Group policy configured${NC}"
 echo ""
 
-# Configure EC2 CPU alarm for auto-trigger (Scenario 1 only)
-echo -e "${YELLOW}Configuring EC2 CPU alarm for auto-trigger...${NC}"
+# Configure RDS connections alarm for auto-trigger (Scenario 1 only)
+echo -e "${YELLOW}Configuring RDS connections alarm for auto-trigger...${NC}"
 
 aws cloudwatch put-metric-alarm \
-    --alarm-name cw-demo-ec2-high-cpu \
-    --alarm-description "Triggers when EC2 CPU exceeds 80%" \
-    --metric-name CPUUtilization \
-    --namespace AWS/EC2 \
+    --alarm-name cw-demo-rds-high-connections \
+    --alarm-description "Triggers when RDS connections exceed 50" \
+    --metric-name DatabaseConnections \
+    --namespace AWS/RDS \
     --statistic Average \
     --period 60 \
     --evaluation-periods 2 \
     --datapoints-to-alarm 2 \
-    --threshold 80 \
+    --threshold 50 \
     --comparison-operator GreaterThanThreshold \
-    --dimensions Name=InstanceId,Value=$EC2_INSTANCE_ID \
+    --dimensions Name=DBInstanceIdentifier,Value=cw-investigations-demo-db \
     --treat-missing-data notBreaching \
-    --alarm-actions "$INVESTIGATION_GROUP_ARN#DEDUPE_STRING=ec2-performance" \
+    --alarm-actions "$INVESTIGATION_GROUP_ARN#DEDUPE_STRING=rds-connections" \
     --region $REGION
 
-echo -e "${GREEN}✓ EC2 CPU alarm configured for auto-trigger${NC}"
+echo -e "${GREEN}✓ RDS connections alarm configured for auto-trigger${NC}"
 echo ""
 
 # Verify configuration
 echo -e "${YELLOW}Verifying alarm configuration...${NC}"
 ALARM_ACTIONS=$(aws cloudwatch describe-alarms \
-    --alarm-names cw-demo-ec2-high-cpu \
+    --alarm-names cw-demo-rds-high-connections \
     --region $REGION \
     --query 'MetricAlarms[0].AlarmActions[0]' \
     --output text 2>/dev/null)
@@ -138,8 +138,8 @@ echo ""
 echo -e "${YELLOW}Configuration Summary:${NC}"
 echo -e "  ✓ Investigation Group: Created/Verified"
 echo -e "  ✓ Resource Policy: Configured"
-echo -e "  ✓ EC2 CPU Alarm: Auto-trigger enabled (Scenario 1)"
-echo -e "  ✓ Lambda/RDS Alarms: Manual start (Scenarios 2 & 3)"
+echo -e "  ✓ RDS Connections Alarm: Auto-trigger enabled (Scenario 1)"
+echo -e "  ✓ Lambda Alarms: Manual start (Scenario 2)"
 echo ""
 echo -e "${YELLOW}Next Steps:${NC}"
 echo -e "  1. Run: ${GREEN}./scenarios/scenario-1.sh${NC}"

@@ -20,7 +20,7 @@ VPC (10.0.0.0/16)
 ├── Public Subnets (10.0.1.0/24, 10.0.2.0/24)
 │   └── EC2 (t3.small)
 │       ├── Flask 应用（后台运行）
-│       └── stress-ng 工具（场景1使用）
+│       └── 慢查询端点（场景1使用）
 │
 ├── Private Subnets (10.0.11.0/24, 10.0.12.0/24)
 │   ├── RDS MySQL (db.t3.medium)
@@ -29,29 +29,33 @@ VPC (10.0.0.0/16)
 ├── Lambda Fault Injector (256MB, VPC 外)
 │   └── 通过 SSM 向 EC2 发送命令
 │
+├── SSM Automation Document
+│   └── RemediateRDSHighConnections
+│
 └── API Gateway
     └── 路由到 Lambda API
 ```
 
-**资源说明**：  
-- **EC2**: 部署了 Flask 应用和 stress-ng 压测工具（预装），场景1只使用 stress-ng 压测  
-- **RDS**: MySQL 数据库，场景2使用  
+**资源说明**:  
+- **EC2**: 部署了 Flask 应用，提供慢查询端点，场景1使用  
+- **RDS**: MySQL 数据库，场景1和场景2共用  
 - **Lambda API**: 在 VPC 内，连接 RDS，已启用 X-Ray 追踪，场景2使用  
-- **Lambda Fault Injector**: 在 VPC 外，通过 SSM Send Command 在 EC2 上启动 stress-ng 工具，场景1使用  
+- **Lambda Fault Injector**: 在 VPC 外，通过 SSM Send Command 在 EC2 上触发慢查询负载，场景1使用  
+- **SSM Automation Document**: 自动修复 Runbook，停止 EC2 上的慢查询负载，场景1使用  
 - **API Gateway**: 提供 HTTP 接口，路由到 Lambda API，场景2使用
 
 ### 应用架构
 
-#### 架构 A: EC2 独立运行（场景1使用）
+#### 架构 A: EC2 Flask 应用（场景1使用）
 ```
-EC2 实例（运行 stress-ng 压测）
+Lambda Fault Injector → EC2 Flask → RDS MySQL
 ```
-- 运行 CPU 压测工具
-- 用于演示 EC2 CPU 负载过高问题
+- Lambda Fault Injector 触发 EC2 发起并发慢查询请求
+- 用于演示数据库连接堆积问题
 
 #### 架构 B: Lambda API（场景2使用）
 ```
-用户 → API Gateway → Lambda API → RDS MySQL
+User Requests → API Gateway → Lambda API → RDS MySQL
 ```
 - Lambda 函数直接连接 RDS
 - 用于演示 Lambda 慢查询问题
@@ -62,7 +66,7 @@ EC2 实例（运行 stress-ng 压测）
 
 | 场景 | 使用架构 | 调用链 | 涉及服务 |
 |------|---------|--------|---------|
-| 场景1: EC2 CPU 飙升 | 架构 A | Fault Injector → SSM → EC2 | EC2 |
+| 场景1: EC2 应用慢查询 | 架构 A | Fault Injector → SSM → EC2 → RDS | EC2, RDS |
 | 场景2: Lambda 慢查询 | 架构 B | API Gateway → Lambda → RDS | Lambda, RDS |
 
 ---
@@ -80,24 +84,21 @@ EC2 实例（运行 stress-ng 压测）
 ./deploy.sh
 #    自动完成：
 #    - CloudFormation 部署所有资源
-#    - EC2 UserData 自动初始化 RDS 数据库和 users 表
+#    - EC2 UserData 安装依赖并创建 Flask 应用
+#    - Flask 应用启动时自动初始化数据库
 
 # 2. 配置 Investigation 集成（1分钟）⭐ 必需步骤
 ./setup-investigation.sh
 #    作用：
 #    - 创建/检测 Investigation Group
 #    - 配置 Investigation Group 资源策略
-#    - 配置场景1的 EC2 CPU 告警自动触发 Investigation
+#    - 配置场景1的 RDS 连接数告警自动触发 Investigation
 #    - 场景2保持手动启动
 
 # 3. 验证部署（可选）
 ./verify-deployment.sh
 
-# 4. 如果数据库查询失败（可选）
-./init-database.sh
-#    仅在 EC2 UserData 初始化失败时手动运行
-
-# 5. 运行演示场景
+# 4. 运行演示场景
 ./scenarios/scenario-1.sh  # 推荐主演示
 ```
 
@@ -117,7 +118,7 @@ EC2 实例（运行 stress-ng 压测）
 
 ## 演示场景
 
-### 场景1: EC2 CPU 飙升（推荐主演示）⭐
+### 场景1: EC2 应用慢查询（推荐主演示）⭐
 
 **时长**: 8分钟  
 **核心功能**: 告警自动触发 + AI 分析 + 手动修复
@@ -129,32 +130,36 @@ EC2 实例（运行 stress-ng 压测）
 ./scenarios/scenario-1.sh
 
 # 2. 等待 2-3 分钟
-#    - CPU 飙升到 100%
+#    - EC2 Flask 应用发起 150 个并发慢查询
+#    - RDS 连接数飙升到 150+
 #    - 告警自动触发
 #    - Investigation 自动启动
 
 # 3. 打开 Investigation 控制台（从部署输出获取链接）
 #    - 查看 AI 分析和根因假设
-#    - 查看建议的修复操作（可能包含 SSM Runbook）
+#    - 查看 EC2 → RDS 跨服务关联
+#    - 根因：数据库慢查询导致连接堆积
 
 # 4. 执行修复
-./scenarios/stop-stress.sh
-#    或使用 Investigation 中的 SSM Runbook（如果显示）
+./scenarios/stop-load.sh
 
-# 5. 验证 CPU 恢复正常，生成事件报告
+# 5. 验证 RDS 连接数恢复正常，生成事件报告
 ```
 
 #### 关键演示点
 - ✅ 告警自动触发 Investigation
-- ✅ AI 自动分析 CPU 指标异常
+- ✅ AI 自动分析 RDS 连接数异常
+- ✅ 跨服务关联（EC2 应用 → RDS）
 - ✅ 生成根因假设
-- ✅ 手动/自动执行修复
+- ✅ SSM Automation 自动修复建议
+- ✅ 手动执行修复（脚本或 SSM Runbook）
 - ✅ 完整的事件报告
 
 #### 注意事项
-- CPU 压力测试持续 30 分钟，需要手动停止
-- SSM Automation 建议可能不会自动显示（取决于 AI 分析）
-- 如果没有 SSM 建议，使用 `./scenarios/stop-stress.sh` 手动停止
+- 慢查询负载持续 30 分钟后自动停止
+- 也可以手动运行 `./scenarios/stop-load.sh` 提前停止
+- 每个查询延迟 40 秒，150 个并发请求
+- 负载会每 35 秒发起一批新的 150 个并发请求，持续保持高连接数
 
 ### 场景2: Lambda 慢查询
 
@@ -206,59 +211,7 @@ EC2 实例（运行 stress-ng 压测）
 - Lambda 超时设置: 30 秒
 - 数据库查询延迟: 25 秒（接近超时，触发告警）
 - X-Ray 显示完整调用链
-- Investigation 自动关联所有信号
-
----
-
-## 故障排查
-
-### Investigation 未启动
-```bash
-# 检查告警配置
-aws cloudwatch describe-alarms --alarm-names cw-demo-ec2-high-cpu
-
-# 检查 Investigation Group
-aws aiops list-investigation-groups --region us-east-1
-```
-
-**解决方案**:
-- 等待 2-3 分钟（AI 分析需要时间）
-- 检查 IAM 权限
-- 验证告警配置
-
-### SSM Runbook 失败
-```bash
-# 检查 SSM Agent
-aws ssm describe-instance-information
-
-# 查看 Automation 执行
-aws ssm describe-automation-executions
-```
-
-**解决方案**:
-- 确认 SSM Agent 在线
-- 检查 IAM 角色权限
-- 查看执行日志详情
-
-### Lambda 慢查询
-```bash
-# 查看 Lambda 日志
-aws logs tail /aws/lambda/cw-investigations-demo-api --follow
-
-# 检查 VPC 配置
-aws lambda get-function-configuration --function-name cw-investigations-demo-api
-```
-
-**解决方案**:
-- 检查 VPC 和安全组配置
-- 验证 RDS 可访问性
-- 查看 Lambda 日志
-
-### 部署失败
-**解决方案**:
-- 检查 AWS CLI 配置
-- 验证账户配额
-- 查看 CloudFormation 事件日志
+- Investigation 关联监控信息
 
 ---
 
@@ -269,8 +222,8 @@ aws lambda get-function-configuration --function-name cw-investigations-demo-api
 aws cloudformation describe-stacks --stack-name cw-investigations-demo \
   --query 'Stacks[0].Outputs' --output table
 
-# 停止压力测试
-./scenarios/stop-stress.sh
+# 停止负载测试
+./scenarios/stop-load.sh
 
 # 查看 Lambda 日志
 aws logs tail /aws/lambda/cw-investigations-demo-api --follow
@@ -313,17 +266,16 @@ us-east-1 | us-west-2
 ├── setup-investigation.sh       # 配置 Investigation 集成
 ├── cleanup.sh                   # 一键清理
 ├── verify-deployment.sh         # 部署验证
-├── init-database.sh             # 数据库初始化（仅在 UserData 失败时运行）
 ├── cloudformation/
 │   └── demo-stack.yaml          # 基础设施（30+资源，含 SSM Runbook）
 ├── app/                         # 应用代码
-│   ├── lambda-api.py
-│   ├── fault-injector.py
-│   └── ec2-app.py
+│   ├── ec2-app.py               # EC2 Flask 应用
+│   ├── lambda-api.py            # Lambda API 函数
+│   └── fault-injector.py        # 故障注入 Lambda
 └── scenarios/                   # 场景触发脚本
     ├── scenario-1.sh
     ├── scenario-2.sh
-    └── stop-stress.sh
+    └── stop-load.sh
 ```
 
 ---
@@ -332,11 +284,11 @@ us-east-1 | us-west-2
 
 | 功能 | 场景1 | 场景2 |
 |------|-------|-------|
-| 告警启动 | ✅ | ✅ |
+| 告警触发 | ✅ 自动 | ❌ 手动 |
 | AI 分析 | 自动 | 手动 |
 | 手动/自动修复 | ✅ 脚本/SSM | ❌ |
 | X-Ray 追踪 | ❌ | ✅ |
-| 跨服务关联 | ❌ | ✅ |
+| 跨服务关联 | ✅ | ✅ |
 | 聊天界面 | ❌ | ✅ |
 | 报告生成 | ✅ | ✅ |
 

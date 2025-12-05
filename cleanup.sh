@@ -32,8 +32,8 @@ echo -e "${YELLOW}Note: Investigation Group is not deleted (shared resource)${NC
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET_NAME="cw-investigations-demo-${ACCOUNT_ID}-${REGION}"
 
-# Stop any running stress tests
-echo -e "${YELLOW}Stopping any running stress tests...${NC}"
+# Stop any running load tests
+echo -e "${YELLOW}Stopping any running load tests...${NC}"
 INSTANCE_ID=$(aws cloudformation describe-stacks \
     --stack-name $STACK_NAME \
     --region $REGION \
@@ -44,10 +44,10 @@ if [ ! -z "$INSTANCE_ID" ]; then
     aws ssm send-command \
         --instance-ids $INSTANCE_ID \
         --document-name "AWS-RunShellScript" \
-        --parameters 'commands=["pkill -9 -f stress-ng || true"]' \
+        --parameters 'commands=["pkill -f \"curl.*slow-query\" || true"]' \
         --region $REGION \
         --output text > /dev/null 2>&1 || true
-    echo -e "${GREEN}✓ Stopped stress tests${NC}"
+    echo -e "${GREEN}✓ Stopped load tests${NC}"
 fi
 
 # Delete CloudFormation stack

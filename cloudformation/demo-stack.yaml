@@ -16,6 +16,15 @@ Parameters:
   LambdaCodeBucket:
     Type: String
     Description: S3 bucket containing Lambda deployment packages
+  
+  AppCodeBucket:
+    Type: String
+    Description: S3 bucket containing EC2 application code
+  
+  AppCodeKey:
+    Type: String
+    Default: ec2-app.py
+    Description: S3 key for EC2 application code
 
 Resources:
   # ==================== VPC and Networking ====================
@@ -176,6 +185,18 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: S3ReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AppCodeBucket}/*'
+                  - !Sub 'arn:aws:s3:::${AppCodeBucket}'
       Tags:
         - Key: Name
           Value: cw-demo-ec2-role
@@ -318,15 +339,34 @@ Resources:
           #!/bin/bash
           set -e
           
+          # 添加日志输出
+          exec > >(tee /var/log/user-data.log)
+          exec 2>&1
+          
+          echo "=== Starting UserData execution at $(date) ==="
+          
           # Update system
+          echo "Updating system packages..."
           yum update -y
           
+          # Wait for yum lock to be released
+          echo "Waiting for yum lock to be released..."
+          for i in {1..30}; do
+            if ! fuser /var/lib/rpm/.rpm.lock >/dev/null 2>&1; then
+              echo "RPM lock released"
+              break
+            fi
+            echo "Waiting for RPM lock... ($i/30)"
+            sleep 2
+          done
+          
           # Install dependencies
-          yum install -y python3 python3-pip stress-ng mariadb105
+          echo "Installing dependencies..."
+          yum install -y python3 python3-pip mariadb105
           
           # Install CloudWatch Agent
-          wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
-          rpm -U ./amazon-cloudwatch-agent.rpm
+          echo "Installing CloudWatch Agent..."
+          yum install -y amazon-cloudwatch-agent
           
           # Configure CloudWatch Agent
           cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json << 'EOF'
@@ -374,6 +414,7 @@ Resources:
           EOF
           
           # Start CloudWatch Agent
+          echo "Starting CloudWatch Agent..."
           /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
             -a fetch-config \
             -m ec2 \
@@ -381,92 +422,19 @@ Resources:
             -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json
           
           # Install Python dependencies
+          echo "Installing Python dependencies..."
           pip3 install flask pymysql boto3
           
           # Create app directory
+          echo "Creating app directory..."
           mkdir -p /opt/app
           cd /opt/app
           
-          # Create Flask app (embedded code)
-          cat > /opt/app/app.py << 'PYEOF'
-          import os
-          import time
-          import pymysql
-          from flask import Flask, jsonify, request
-          import logging
+          # Download Flask app from S3
+          echo "Downloading Flask app from S3..."
+          aws s3 cp s3://${AppCodeBucket}/${AppCodeKey} /opt/app/app.py
           
-          app = Flask(__name__)
-          logging.basicConfig(level=logging.INFO)
-          logger = logging.getLogger(__name__)
-          
-          DB_HOST = os.environ.get('DB_HOST', 'localhost')
-          DB_USER = os.environ.get('DB_USER', 'admin')
-          DB_PASSWORD = os.environ.get('DB_PASSWORD', '')
-          DB_NAME = os.environ.get('DB_NAME', 'demoapp')
-          
-          def get_db_connection():
-              return pymysql.connect(
-                  host=DB_HOST,
-                  user=DB_USER,
-                  password=DB_PASSWORD,
-                  database=DB_NAME,
-                  connect_timeout=5
-              )
-          
-          @app.route('/')
-          def home():
-              return jsonify({'status': 'healthy', 'service': 'ec2-app', 'timestamp': time.time()})
-          
-          @app.route('/health')
-          def health():
-              try:
-                  conn = get_db_connection()
-                  cursor = conn.cursor()
-                  cursor.execute("SELECT 1")
-                  cursor.close()
-                  conn.close()
-                  return jsonify({'status': 'healthy', 'database': 'connected', 'timestamp': time.time()})
-              except Exception as e:
-                  logger.error(f"Health check failed: {str(e)}")
-                  return jsonify({'status': 'unhealthy', 'database': 'disconnected', 'error': str(e), 'timestamp': time.time()}), 503
-          
-          @app.route('/api/users', methods=['GET'])
-          def get_users():
-              try:
-                  conn = get_db_connection()
-                  cursor = conn.cursor(pymysql.cursors.DictCursor)
-                  cursor.execute("SELECT id, name, email, created_at FROM users")
-                  users = cursor.fetchall()
-                  cursor.close()
-                  conn.close()
-                  return jsonify({'success': True, 'count': len(users), 'users': users})
-              except Exception as e:
-                  logger.error(f"Failed to get users: {str(e)}")
-                  return jsonify({'success': False, 'error': str(e)}), 500
-          
-          @app.route('/api/users', methods=['POST'])
-          def create_user():
-              try:
-                  data = request.get_json()
-                  name = data.get('name')
-                  email = data.get('email')
-                  if not name or not email:
-                      return jsonify({'success': False, 'error': 'Name and email are required'}), 400
-                  conn = get_db_connection()
-                  cursor = conn.cursor()
-                  cursor.execute("INSERT INTO users (name, email) VALUES (%s, %s)", (name, email))
-                  conn.commit()
-                  user_id = cursor.lastrowid
-                  cursor.close()
-                  conn.close()
-                  return jsonify({'success': True, 'user_id': user_id, 'name': name, 'email': email}), 201
-              except Exception as e:
-                  logger.error(f"Failed to create user: {str(e)}")
-                  return jsonify({'success': False, 'error': str(e)}), 500
-          
-          if __name__ == '__main__':
-              app.run(host='0.0.0.0', port=5000, debug=False)
-          PYEOF
+          echo "Flask app downloaded successfully"
           
           # Set environment variables
           export DB_HOST=${DemoDB.Endpoint.Address}
@@ -560,11 +528,12 @@ Resources:
           SVCEOF
           
           # Start the app
+          echo "Starting Flask application..."
           systemctl daemon-reload
           systemctl enable demo-app
           systemctl start demo-app
           
-          echo "EC2 instance setup complete"
+          echo "=== EC2 instance setup complete at $(date) ==="
 
   # ==================== Lambda Functions ====================
   LambdaAPIFunction:
@@ -697,25 +666,48 @@ Resources:
   StopStressProcessDocument:
     Type: AWS::SSM::Document
     Properties:
-      Name: Custom-RemediateEC2HighCPUUtilization
+      Name: RemediateRDSHighConnections
       DocumentType: Automation
       DocumentFormat: YAML
       Tags:
         - Key: Category
           Value: Performance
         - Key: Issue
-          Value: HighCPU
+          Value: HighConnections
+        - Key: IssueType
+          Value: DatabaseConnections
         - Key: ResourceType
-          Value: EC2
+          Value: RDS
+        - Key: AffectedService
+          Value: RDS
         - Key: Severity
           Value: High
         - Key: Purpose
-          Value: CPU-Remediation
+          Value: Remediation
+        - Key: RemediationType
+          Value: StopSlowQueryLoad
+        - Key: AutomationTarget
+          Value: EC2
       Content:
         description: |
-          Remediate high CPU utilization on EC2 instances by stopping CPU-intensive processes.
-          This runbook helps resolve performance issues and CPU spikes caused by stress-ng workloads.
-          Use this automation to quickly restore normal CPU levels and improve instance performance.
+          ## What does this document do?
+          This automation document remediates high RDS database connections by stopping slow query load on EC2 instances.
+          
+          ## When to use this document?
+          Use this runbook when:
+          - RDS DatabaseConnections metric exceeds normal thresholds
+          - Database connection pool is exhausted
+          - Application is generating excessive slow queries
+          
+          ## What does this document remediate?
+          - Stops slow query load processes on EC2 instances
+          - Reduces active database connections
+          - Restores normal RDS connection levels
+          
+          ## Prerequisites
+          - EC2 instance must be running
+          - SSM Agent must be online
+          - Instance must have appropriate IAM permissions
         schemaVersion: '0.3'
         assumeRole: !GetAtt SSMAutomationRole.Arn
         parameters:
@@ -740,29 +732,29 @@ Resources:
                 - running
             description: Verify EC2 instance is running before remediation
           
-          - name: GetCPUBeforeRemediation
+          - name: GetConnectionsBeforeRemediation
             action: 'aws:executeAwsApi'
             inputs:
               Service: cloudwatch
               Api: GetMetricStatistics
-              Namespace: AWS/EC2
-              MetricName: CPUUtilization
+              Namespace: AWS/RDS
+              MetricName: DatabaseConnections
               Dimensions:
-                - Name: InstanceId
-                  Value: '{{ InstanceId }}'
+                - Name: DBInstanceIdentifier
+                  Value: cw-investigations-demo-db
               StartTime: '{{ global:DATE_TIME }}'
               EndTime: '{{ global:DATE_TIME }}'
               Period: 300
               Statistics:
                 - Average
             outputs:
-              - Name: CPUBefore
+              - Name: ConnectionsBefore
                 Selector: '$.Datapoints[0].Average'
                 Type: String
-            description: Get CPU utilization before remediation
+            description: Get RDS connections before remediation
             onFailure: Continue
           
-          - name: StopStressProcess
+          - name: StopSlowQueryLoad
             action: 'aws:runCommand'
             inputs:
               DocumentName: AWS-RunShellScript
@@ -772,82 +764,86 @@ Resources:
                 commands:
                   - |
                     #!/bin/bash
-                    echo "Checking for stress-ng processes causing high CPU..."
-                    STRESS_PIDS=$(pgrep -f stress-ng)
+                    echo "Stopping slow query load processes..."
                     
-                    if [ -z "$STRESS_PIDS" ]; then
-                      echo "No stress-ng processes found"
-                      exit 0
+                    # Get PIDs of loop scripts (excluding current script)
+                    SCRIPT_PIDS=$(pgrep -f "awsrunShellScript.*_script.sh" | grep -v $$)
+                    
+                    if [ -n "$SCRIPT_PIDS" ]; then
+                      echo "Stopping loop scripts: $SCRIPT_PIDS"
+                      echo "$SCRIPT_PIDS" | xargs kill -9 2>/dev/null || true
                     fi
                     
-                    echo "Found stress-ng processes: $STRESS_PIDS"
-                    echo "Stopping CPU-intensive processes to resolve high CPU utilization..."
-                    pkill -9 -f stress-ng
+                    sleep 1
+                    
+                    # Stop all curl processes
+                    echo "Stopping curl processes..."
+                    pkill -9 curl || true
                     
                     sleep 2
                     
                     # Verify processes are stopped
-                    REMAINING=$(pgrep -f stress-ng)
-                    if [ -z "$REMAINING" ]; then
-                      echo "Successfully stopped all CPU-intensive processes"
+                    REMAINING_CURL=$(pgrep curl || true)
+                    if [ -z "$REMAINING_CURL" ]; then
+                      echo "Successfully stopped all slow query load processes"
                       exit 0
                     else
-                      echo "Warning: Some processes still running: $REMAINING"
+                      echo "Warning: Some processes still running: $REMAINING_CURL"
                       exit 1
                     fi
-            description: Stop CPU-intensive stress-ng processes to remediate high CPU utilization
+            description: Stop slow query load processes to remediate high RDS connections
             onFailure: Abort
           
-          - name: WaitForCPUToRecover
+          - name: WaitForConnectionsToRecover
             action: 'aws:sleep'
             inputs:
               Duration: PT1M
-            description: Wait 60 seconds for CPU to recover to normal levels
+            description: Wait 60 seconds for RDS connections to recover to normal levels
           
-          - name: VerifyCPURecovery
+          - name: VerifyConnectionsRecovery
             action: 'aws:executeAwsApi'
             inputs:
               Service: cloudwatch
               Api: GetMetricStatistics
-              Namespace: AWS/EC2
-              MetricName: CPUUtilization
+              Namespace: AWS/RDS
+              MetricName: DatabaseConnections
               Dimensions:
-                - Name: InstanceId
-                  Value: '{{ InstanceId }}'
+                - Name: DBInstanceIdentifier
+                  Value: cw-investigations-demo-db
               StartTime: '{{ global:DATE_TIME }}'
               EndTime: '{{ global:DATE_TIME }}'
               Period: 60
               Statistics:
                 - Average
             outputs:
-              - Name: CPUAfter
+              - Name: ConnectionsAfter
                 Selector: '$.Datapoints[0].Average'
                 Type: String
-            description: Verify CPU has recovered to normal levels after remediation
+            description: Verify RDS connections have recovered to normal levels after remediation
             onFailure: Continue
         
         outputs:
-          - StopStressProcess.Output
-          - GetCPUBeforeRemediation.CPUBefore
-          - VerifyCPURecovery.CPUAfter
+          - StopSlowQueryLoad.Output
+          - GetConnectionsBeforeRemediation.ConnectionsBefore
+          - VerifyConnectionsRecovery.ConnectionsAfter
 
   # ==================== CloudWatch Alarms ====================
-  EC2HighCPUAlarm:
+  RDSHighConnectionsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: cw-demo-ec2-high-cpu
-      AlarmDescription: Triggers when EC2 CPU exceeds 80%
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
+      AlarmName: cw-demo-rds-high-connections
+      AlarmDescription: Triggers when RDS connections exceed 50
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
       Statistic: Average
       Period: 60
       EvaluationPeriods: 2
       DatapointsToAlarm: 2
-      Threshold: 80
+      Threshold: 50
       ComparisonOperator: GreaterThanThreshold
       Dimensions:
-        - Name: InstanceId
-          Value: !Ref DemoEC2Instance
+        - Name: DBInstanceIdentifier
+          Value: !Ref DemoDB
       TreatMissingData: notBreaching
 
   LambdaHighDurationAlarm:
@@ -900,6 +896,14 @@ Outputs:
     Description: Fault Injector Lambda Function Name
     Value: !Ref FaultInjectorFunction
   
+  RDSConnectionsAlarmName:
+    Description: RDS High Connections Alarm Name
+    Value: !Ref RDSHighConnectionsAlarm
+  
   SSMDocumentName:
     Description: SSM Automation Document Name
     Value: !Ref StopStressProcessDocument
+  
+  SSMAutomationRoleArn:
+    Description: SSM Automation Role ARN
+    Value: !GetAtt SSMAutomationRole.Arn

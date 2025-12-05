@@ -87,6 +87,11 @@ echo -e "${YELLOW}Uploading Lambda packages to S3...${NC}"
 aws s3 cp /tmp/lambda-packages/lambda-api.zip "s3://${BUCKET_NAME}/lambda-api.zip"
 aws s3 cp /tmp/lambda-packages/fault-injector.zip "s3://${BUCKET_NAME}/fault-injector.zip"
 echo -e "${GREEN}✓ Uploaded Lambda packages${NC}"
+
+# Upload EC2 application code
+echo -e "${YELLOW}Uploading EC2 application code to S3...${NC}"
+aws s3 cp "$SCRIPT_DIR/app/ec2-app.py" "s3://${BUCKET_NAME}/ec2-app.py"
+echo -e "${GREEN}✓ Uploaded EC2 application code${NC}"
 echo ""
 
 # Deploy CloudFormation stack
@@ -99,6 +104,8 @@ aws cloudformation deploy \
     --parameter-overrides \
         DBPassword="DemoPassword123!" \
         LambdaCodeBucket="${BUCKET_NAME}" \
+        AppCodeBucket="${BUCKET_NAME}" \
+        AppCodeKey="ec2-app.py" \
     --no-fail-on-empty-changeset
 
 echo -e "${GREEN}✓ Stack deployed${NC}"
@@ -205,7 +212,7 @@ echo -e "  EC2 App: curl http://${EC2_PUBLIC_IP}:5000/health"
 echo -e "  Lambda API: curl ${API_ENDPOINT}/api/users"
 echo ""
 echo -e "${YELLOW}🚀 Run Demo Scenarios:${NC}"
-echo -e "  Scenario 1 (CPU): ./scenarios/scenario-1.sh"
+echo -e "  Scenario 1 (RDS Connections): ./scenarios/scenario-1.sh"
 echo -e "  Scenario 2 (Lambda): ./scenarios/scenario-2.sh"
 echo ""
 echo -e "${YELLOW}🧹 Cleanup:${NC}"

@@ -28,11 +28,7 @@ def get_db_connection():
 @app.route('/')
 def home():
     """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'service': 'ec2-app',
-        'timestamp': time.time()
-    })
+    return jsonify({'status': 'healthy', 'service': 'ec2-app', 'timestamp': time.time()})
 
 @app.route('/health')
 def health():
@@ -43,20 +39,10 @@ def health():
         cursor.execute("SELECT 1")
         cursor.close()
         conn.close()
-        
-        return jsonify({
-            'status': 'healthy',
-            'database': 'connected',
-            'timestamp': time.time()
-        })
+        return jsonify({'status': 'healthy', 'database': 'connected', 'timestamp': time.time()})
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
-        return jsonify({
-            'status': 'unhealthy',
-            'database': 'disconnected',
-            'error': str(e),
-            'timestamp': time.time()
-        }), 503
+        return jsonify({'status': 'unhealthy', 'database': 'disconnected', 'error': str(e), 'timestamp': time.time()}), 503
 
 @app.route('/api/users', methods=['GET'])
 def get_users():
@@ -68,18 +54,10 @@ def get_users():
         users = cursor.fetchall()
         cursor.close()
         conn.close()
-        
-        return jsonify({
-            'success': True,
-            'count': len(users),
-            'users': users
-        })
+        return jsonify({'success': True, 'count': len(users), 'users': users})
     except Exception as e:
         logger.error(f"Failed to get users: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/users', methods=['POST'])
 def create_user():
@@ -88,36 +66,35 @@ def create_user():
         data = request.get_json()
         name = data.get('name')
         email = data.get('email')
-        
         if not name or not email:
-            return jsonify({
-                'success': False,
-                'error': 'Name and email are required'
-            }), 400
-        
+            return jsonify({'success': False, 'error': 'Name and email are required'}), 400
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO users (name, email) VALUES (%s, %s)",
-            (name, email)
-        )
+        cursor.execute("INSERT INTO users (name, email) VALUES (%s, %s)", (name, email))
         conn.commit()
         user_id = cursor.lastrowid
         cursor.close()
         conn.close()
-        
-        return jsonify({
-            'success': True,
-            'user_id': user_id,
-            'name': name,
-            'email': email
-        }), 201
+        return jsonify({'success': True, 'user_id': user_id, 'name': name, 'email': email}), 201
     except Exception as e:
         logger.error(f"Failed to create user: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/slow-query')
+def slow_query():
+    """Slow query endpoint for demo - holds DB connection for extended time"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # Execute a long-running query to keep connection active
+        # This will hold the connection for 40 seconds
+        cursor.execute("SELECT SLEEP(40)")
+        cursor.close()
+        conn.close()
+        return jsonify({'success': True, 'message': 'Slow query completed', 'timestamp': time.time()})
+    except Exception as e:
+        logger.error(f"Slow query failed: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
