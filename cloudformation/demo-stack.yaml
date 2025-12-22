@@ -1,0 +1,909 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudWatch Investigations Demo - Complete Stack'
+
+Parameters:
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Default: DemoPassword123!
+    Description: RDS MySQL password
+    MinLength: 8
+  
+  LambdaCodeBucket:
+    Type: String
+    Description: S3 bucket containing Lambda deployment packages
+  
+  AppCodeBucket:
+    Type: String
+    Description: S3 bucket containing EC2 application code
+  
+  AppCodeKey:
+    Type: String
+    Default: ec2-app.py
+    Description: S3 key for EC2 application code
+
+Resources:
+  # ==================== VPC and Networking ====================
+  DemoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: cw-investigations-demo-vpc
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: cw-demo-public-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: cw-demo-public-2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: cw-demo-private-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.0.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: cw-demo-private-2
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: cw-demo-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DemoVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DemoVPC
+      Tags:
+        - Key: Name
+          Value: cw-demo-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ==================== Security Groups ====================
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 demo instance
+      VpcId: !Ref DemoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
+          Description: Flask app
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH (for troubleshooting)
+      Tags:
+        - Key: Name
+          Value: cw-demo-ec2-sg
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS instance
+      VpcId: !Ref DemoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+          Description: From EC2
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+          Description: From Lambda
+      Tags:
+        - Key: Name
+          Value: cw-demo-rds-sg
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref DemoVPC
+      Tags:
+        - Key: Name
+          Value: cw-demo-lambda-sg
+
+  # ==================== IAM Roles ====================
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: S3ReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AppCodeBucket}/*'
+                  - !Sub 'arn:aws:s3:::${AppCodeBucket}'
+      Tags:
+        - Key: Name
+          Value: cw-demo-ec2-role
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: LambdaSSMPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ec2:DescribeInstances
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: cw-demo-lambda-role
+
+  InvestigationGroupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: aiops.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AIOpsAssistantPolicy
+      Tags:
+        - Key: Name
+          Value: cw-demo-investigation-role
+
+  SSMAutomationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole
+      Policies:
+        - PolicyName: SSMAutomationEC2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - cloudwatch:GetMetricStatistics
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: cw-demo-ssm-automation-role
+
+  # ==================== RDS Database ====================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for demo RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: cw-demo-db-subnet-group
+
+  DemoDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: cw-investigations-demo-db
+      Engine: mysql
+      EngineVersion: '8.0.39'
+      DBInstanceClass: db.t3.medium
+      AllocatedStorage: 20
+      StorageType: gp2
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBPassword
+      DBName: demoapp
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 1
+      EnableCloudwatchLogsExports:
+        - error
+        - slowquery
+      EnablePerformanceInsights: true
+      DatabaseInsightsMode: advanced
+      PerformanceInsightsRetentionPeriod: 465
+      Tags:
+        - Key: Name
+          Value: cw-demo-rds
+
+  # ==================== EC2 Instance ====================
+  DemoEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: DemoDB
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.small
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      SubnetId: !Ref PublicSubnet1
+      Monitoring: true
+      Tags:
+        - Key: Name
+          Value: cw-investigations-demo-ec2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          # 添加日志输出
+          exec > >(tee /var/log/user-data.log)
+          exec 2>&1
+          
+          echo "=== Starting UserData execution at $(date) ==="
+          
+          # Update system
+          echo "Updating system packages..."
+          yum update -y
+          
+          # Wait for yum lock to be released
+          echo "Waiting for yum lock to be released..."
+          for i in {1..30}; do
+            if ! fuser /var/lib/rpm/.rpm.lock >/dev/null 2>&1; then
+              echo "RPM lock released"
+              break
+            fi
+            echo "Waiting for RPM lock... ($i/30)"
+            sleep 2
+          done
+          
+          # Install dependencies
+          echo "Installing dependencies..."
+          yum install -y python3 python3-pip mariadb105
+          
+          # Install CloudWatch Agent
+          echo "Installing CloudWatch Agent..."
+          yum install -y amazon-cloudwatch-agent
+          
+          # Configure CloudWatch Agent
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json << 'EOF'
+          {
+            "metrics": {
+              "namespace": "CWInvestigationsDemo",
+              "metrics_collected": {
+                "cpu": {
+                  "measurement": [
+                    {"name": "cpu_usage_idle", "rename": "CPU_IDLE", "unit": "Percent"},
+                    {"name": "cpu_usage_iowait", "rename": "CPU_IOWAIT", "unit": "Percent"}
+                  ],
+                  "metrics_collection_interval": 60,
+                  "totalcpu": false
+                },
+                "disk": {
+                  "measurement": [
+                    {"name": "used_percent", "rename": "DISK_USED", "unit": "Percent"}
+                  ],
+                  "metrics_collection_interval": 60,
+                  "resources": ["*"]
+                },
+                "mem": {
+                  "measurement": [
+                    {"name": "mem_used_percent", "rename": "MEM_USED", "unit": "Percent"}
+                  ],
+                  "metrics_collection_interval": 60
+                }
+              }
+            },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/app.log",
+                      "log_group_name": "/aws/ec2/cw-investigations-demo",
+                      "log_stream_name": "{instance_id}/app.log"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          EOF
+          
+          # Start CloudWatch Agent
+          echo "Starting CloudWatch Agent..."
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config \
+            -m ec2 \
+            -s \
+            -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json
+          
+          # Install Python dependencies
+          echo "Installing Python dependencies..."
+          pip3 install flask pymysql boto3
+          
+          # Create app directory
+          echo "Creating app directory..."
+          mkdir -p /opt/app
+          cd /opt/app
+          
+          # Download Flask app from S3
+          echo "Downloading Flask app from S3..."
+          aws s3 cp s3://${AppCodeBucket}/${AppCodeKey} /opt/app/app.py
+          
+          echo "Flask app downloaded successfully"
+          
+          # Set environment variables
+          export DB_HOST=${DemoDB.Endpoint.Address}
+          export DB_USER=admin
+          export DB_PASSWORD=${DBPassword}
+          export DB_NAME=demoapp
+          
+          # Initialize database with retry logic
+          echo "Starting database initialization..."
+          MAX_RETRIES=10
+          RETRY_INTERVAL=10
+          CONNECT_TIMEOUT=5
+          TOTAL_TIMEOUT=180
+          RETRY_COUNT=0
+          DB_INITIALIZED=false
+          START_TIME=$(date +%s)
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$DB_INITIALIZED" = false ]; do
+              CURRENT_TIME=$(date +%s)
+              ELAPSED=$((CURRENT_TIME - START_TIME))
+              
+              if [ $ELAPSED -gt $TOTAL_TIMEOUT ]; then
+                  echo "ERROR: Database initialization timeout after ${!ELAPSED}s"
+                  break
+              fi
+              
+              echo "Attempting database initialization (attempt $((RETRY_COUNT+1))/$MAX_RETRIES)..."
+              
+              if mariadb -h ${DemoDB.Endpoint.Address} -u admin -p"${DBPassword}" --connect-timeout=$CONNECT_TIMEOUT << 'SQLEOF'
+          CREATE DATABASE IF NOT EXISTS demoapp;
+          USE demoapp;
+          CREATE TABLE IF NOT EXISTS users (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              name VARCHAR(100) NOT NULL,
+              email VARCHAR(100) NOT NULL UNIQUE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+          );
+          INSERT INTO users (name, email) VALUES
+              ('Alice Johnson', 'alice@example.com'),
+              ('Bob Smith', 'bob@example.com'),
+              ('Charlie Brown', 'charlie@example.com')
+          ON DUPLICATE KEY UPDATE name=VALUES(name);
+          SQLEOF
+              then
+                  # Verify initialization
+                  USER_COUNT=$(mariadb -h ${DemoDB.Endpoint.Address} -u admin -p"${DBPassword}" --connect-timeout=$CONNECT_TIMEOUT -sN -e "SELECT COUNT(*) FROM demoapp.users" 2>/dev/null || echo "0")
+                  if [ "$USER_COUNT" -ge 3 ]; then
+                      echo "SUCCESS: Database initialized with $USER_COUNT users"
+                      DB_INITIALIZED=true
+                  else
+                      echo "WARNING: Database created but user count is $USER_COUNT, retrying..."
+                      RETRY_COUNT=$((RETRY_COUNT+1))
+                      sleep $RETRY_INTERVAL
+                  fi
+              else
+                  echo "Database initialization failed, retrying in $RETRY_INTERVAL seconds..."
+                  RETRY_COUNT=$((RETRY_COUNT+1))
+                  sleep $RETRY_INTERVAL
+              fi
+          done
+          
+          if [ "$DB_INITIALIZED" = false ]; then
+              echo "ERROR: Failed to initialize database after $RETRY_COUNT attempts"
+              echo "Database initialization can be done manually with init-database.sh"
+          else
+              echo "Database initialization completed successfully"
+          fi
+          
+          # Create systemd service
+          cat > /etc/systemd/system/demo-app.service << SVCEOF
+          [Unit]
+          Description=CloudWatch Investigations Demo App
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=/opt/app
+          Environment="DB_HOST=${DemoDB.Endpoint.Address}"
+          Environment="DB_USER=admin"
+          Environment="DB_PASSWORD=${DBPassword}"
+          Environment="DB_NAME=demoapp"
+          ExecStart=/usr/bin/python3 /opt/app/app.py
+          Restart=always
+          StandardOutput=append:/var/log/app.log
+          StandardError=append:/var/log/app.log
+          
+          [Install]
+          WantedBy=multi-user.target
+          SVCEOF
+          
+          # Start the app
+          echo "Starting Flask application..."
+          systemctl daemon-reload
+          systemctl enable demo-app
+          systemctl start demo-app
+          
+          echo "=== EC2 instance setup complete at $(date) ==="
+
+  # ==================== Lambda Functions ====================
+  LambdaAPIFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DemoDB
+    Properties:
+      FunctionName: cw-investigations-demo-api
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt DemoDB.Endpoint.Address
+          DB_USER: admin
+          DB_PASSWORD: !Ref DBPassword
+          DB_NAME: demoapp
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      TracingConfig:
+        Mode: Active
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: lambda-api.zip
+      Tags:
+        - Key: Name
+          Value: cw-demo-lambda-api
+
+  FaultInjectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cw-investigations-demo-fault-injector
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          EC2_INSTANCE_ID: !Ref DemoEC2Instance
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: fault-injector.zip
+      Tags:
+        - Key: Name
+          Value: cw-demo-fault-injector
+
+  # ==================== API Gateway (REST API for X-Ray support) ====================
+  DemoAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: cw-investigations-demo-api
+      Description: Demo API with X-Ray tracing enabled
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  DemoAPIResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DemoAPI
+      ParentId: !GetAtt DemoAPI.RootResourceId
+      PathPart: '{proxy+}'
+
+  DemoAPIMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DemoAPI
+      ResourceId: !Ref DemoAPIResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaAPIFunction.Arn}/invocations
+
+  DemoAPIRootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DemoAPI
+      ResourceId: !GetAtt DemoAPI.RootResourceId
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaAPIFunction.Arn}/invocations
+
+  DemoAPIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - DemoAPIMethod
+      - DemoAPIRootMethod
+    Properties:
+      RestApiId: !Ref DemoAPI
+
+  DemoAPIStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref DemoAPI
+      DeploymentId: !Ref DemoAPIDeployment
+      StageName: prod
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          MetricsEnabled: true
+          DataTraceEnabled: false
+          LoggingLevel: INFO
+
+  DemoAPILogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${DemoAPI}
+      RetentionInDays: 7
+
+  LambdaAPIPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaAPIFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DemoAPI}/*/*
+
+  # ==================== SSM Automation Document ====================
+  StopStressProcessDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: RemediateRDSHighConnections
+      DocumentType: Automation
+      DocumentFormat: YAML
+      Tags:
+        - Key: Category
+          Value: Performance
+        - Key: Issue
+          Value: HighConnections
+        - Key: IssueType
+          Value: DatabaseConnections
+        - Key: ResourceType
+          Value: RDS
+        - Key: AffectedService
+          Value: RDS
+        - Key: Severity
+          Value: High
+        - Key: Purpose
+          Value: Remediation
+        - Key: RemediationType
+          Value: StopSlowQueryLoad
+        - Key: AutomationTarget
+          Value: EC2
+      Content:
+        description: |
+          ## What does this document do?
+          This automation document remediates high RDS database connections by stopping slow query load on EC2 instances.
+          
+          ## When to use this document?
+          Use this runbook when:
+          - RDS DatabaseConnections metric exceeds normal thresholds
+          - Database connection pool is exhausted
+          - Application is generating excessive slow queries
+          
+          ## What does this document remediate?
+          - Stops slow query load processes on EC2 instances
+          - Reduces active database connections
+          - Restores normal RDS connection levels
+          
+          ## Prerequisites
+          - EC2 instance must be running
+          - SSM Agent must be online
+          - Instance must have appropriate IAM permissions
+        schemaVersion: '0.3'
+        assumeRole: !GetAtt SSMAutomationRole.Arn
+        parameters:
+          InstanceId:
+            type: String
+            description: EC2 Instance ID with high CPU utilization
+          AutomationAssumeRole:
+            type: String
+            description: IAM role for automation
+            default: !GetAtt SSMAutomationRole.Arn
+        mainSteps:
+          - name: CheckInstanceStatus
+            action: 'aws:waitForAwsResourceProperty'
+            timeoutSeconds: 300
+            inputs:
+              Service: ec2
+              Api: DescribeInstanceStatus
+              InstanceIds:
+                - '{{ InstanceId }}'
+              PropertySelector: '$.InstanceStatuses[0].InstanceState.Name'
+              DesiredValues:
+                - running
+            description: Verify EC2 instance is running before remediation
+          
+          - name: GetConnectionsBeforeRemediation
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: cloudwatch
+              Api: GetMetricStatistics
+              Namespace: AWS/RDS
+              MetricName: DatabaseConnections
+              Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: cw-investigations-demo-db
+              StartTime: '{{ global:DATE_TIME }}'
+              EndTime: '{{ global:DATE_TIME }}'
+              Period: 300
+              Statistics:
+                - Average
+            outputs:
+              - Name: ConnectionsBefore
+                Selector: '$.Datapoints[0].Average'
+                Type: String
+            description: Get RDS connections before remediation
+            onFailure: Continue
+          
+          - name: StopSlowQueryLoad
+            action: 'aws:runCommand'
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{ InstanceId }}'
+              Parameters:
+                commands:
+                  - |
+                    #!/bin/bash
+                    echo "Stopping slow query load processes..."
+                    
+                    # Get PIDs of loop scripts (excluding current script)
+                    SCRIPT_PIDS=$(pgrep -f "awsrunShellScript.*_script.sh" | grep -v $$)
+                    
+                    if [ -n "$SCRIPT_PIDS" ]; then
+                      echo "Stopping loop scripts: $SCRIPT_PIDS"
+                      echo "$SCRIPT_PIDS" | xargs kill -9 2>/dev/null || true
+                    fi
+                    
+                    sleep 1
+                    
+                    # Stop all curl processes
+                    echo "Stopping curl processes..."
+                    pkill -9 curl || true
+                    
+                    sleep 2
+                    
+                    # Verify processes are stopped
+                    REMAINING_CURL=$(pgrep curl || true)
+                    if [ -z "$REMAINING_CURL" ]; then
+                      echo "Successfully stopped all slow query load processes"
+                      exit 0
+                    else
+                      echo "Warning: Some processes still running: $REMAINING_CURL"
+                      exit 1
+                    fi
+            description: Stop slow query load processes to remediate high RDS connections
+            onFailure: Abort
+          
+          - name: WaitForConnectionsToRecover
+            action: 'aws:sleep'
+            inputs:
+              Duration: PT1M
+            description: Wait 60 seconds for RDS connections to recover to normal levels
+          
+          - name: VerifyConnectionsRecovery
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: cloudwatch
+              Api: GetMetricStatistics
+              Namespace: AWS/RDS
+              MetricName: DatabaseConnections
+              Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: cw-investigations-demo-db
+              StartTime: '{{ global:DATE_TIME }}'
+              EndTime: '{{ global:DATE_TIME }}'
+              Period: 60
+              Statistics:
+                - Average
+            outputs:
+              - Name: ConnectionsAfter
+                Selector: '$.Datapoints[0].Average'
+                Type: String
+            description: Verify RDS connections have recovered to normal levels after remediation
+            onFailure: Continue
+        
+        outputs:
+          - StopSlowQueryLoad.Output
+          - GetConnectionsBeforeRemediation.ConnectionsBefore
+          - VerifyConnectionsRecovery.ConnectionsAfter
+
+  # ==================== CloudWatch Alarms ====================
+  RDSHighConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: cw-demo-rds-high-connections
+      AlarmDescription: Triggers when RDS connections exceed 50
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DemoDB
+      TreatMissingData: notBreaching
+
+  LambdaHighDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: cw-demo-lambda-high-duration
+      AlarmDescription: Triggers when Lambda execution time exceeds 20 seconds
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 20000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaAPIFunction
+      TreatMissingData: notBreaching
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref DemoVPC
+  
+  EC2InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref DemoEC2Instance
+  
+  EC2PublicIP:
+    Description: EC2 Public IP
+    Value: !GetAtt DemoEC2Instance.PublicIp
+  
+  RDSEndpoint:
+    Description: RDS Endpoint
+    Value: !GetAtt DemoDB.Endpoint.Address
+  
+  ApiEndpoint:
+    Description: API Gateway Endpoint
+    Value: !Sub https://${DemoAPI}.execute-api.${AWS::Region}.amazonaws.com/prod
+  
+  InvestigationGroupRoleArn:
+    Description: Investigation Group IAM Role ARN (use with API to create group)
+    Value: !GetAtt InvestigationGroupRole.Arn
+  
+  InvestigationGroupConsole:
+    Description: Investigation Group Console URL
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#investigations:'
+  
+  FaultInjectorFunctionName:
+    Description: Fault Injector Lambda Function Name
+    Value: !Ref FaultInjectorFunction
+  
+  RDSConnectionsAlarmName:
+    Description: RDS High Connections Alarm Name
+    Value: !Ref RDSHighConnectionsAlarm
+  
+  SSMDocumentName:
+    Description: SSM Automation Document Name
+    Value: !Ref StopStressProcessDocument
+  
+  SSMAutomationRoleArn:
+    Description: SSM Automation Role ARN
+    Value: !GetAtt SSMAutomationRole.Arn
