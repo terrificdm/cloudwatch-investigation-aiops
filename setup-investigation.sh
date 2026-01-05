@@ -85,9 +85,8 @@ echo ""
 # Create Investigation Group policy
 echo -e "${YELLOW}Creating Investigation Group policy...${NC}"
 aws aiops put-investigation-group-policy \
-    --investigation-group-arn "$INVESTIGATION_GROUP_ARN" \
-    --region $REGION \
-    --policy-document "{
+    --identifier "$INVESTIGATION_GROUP_ARN" \
+    --policy "{
         \"Version\": \"2008-10-17\",
         \"Statement\": [{
             \"Effect\": \"Allow\",
@@ -99,7 +98,7 @@ aws aiops put-investigation-group-policy \
                 \"ArnLike\": {\"aws:SourceArn\": \"arn:aws:cloudwatch:$REGION:$ACCOUNT_ID:alarm:*\"}
             }
         }]
-    }" > /dev/null 2>&1
+    }"
 
 echo -e "${GREEN}✓ Investigation Group policy configured${NC}"
 echo ""
