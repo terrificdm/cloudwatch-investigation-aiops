@@ -53,9 +53,11 @@ echo -e "${YELLOW}Setting up Investigation Group...${NC}"
 INVESTIGATION_GROUP_ARN=$(aws aiops list-investigation-groups \
     --region $REGION \
     --query 'investigationGroups[0].arn' \
-    --output text 2>/dev/null)
+    --output text)
 
-if [ -n "$INVESTIGATION_GROUP_ARN" ] && [ "$INVESTIGATION_GROUP_ARN" != "None" ]; then
+echo "Debug: INVESTIGATION_GROUP_ARN='$INVESTIGATION_GROUP_ARN'"
+
+if [ -n "$INVESTIGATION_GROUP_ARN" ] && [ "$INVESTIGATION_GROUP_ARN" != "None" ] && [ "$INVESTIGATION_GROUP_ARN" != "null" ]; then
     echo -e "${GREEN}✓ Using existing Investigation Group${NC}"
 else
     echo -e "${YELLOW}Creating Investigation Group...${NC}"
@@ -66,9 +68,9 @@ else
         --is-cloud-trail-event-history-enabled \
         --region $REGION \
         --query 'investigationGroupArn' \
-        --output text 2>/dev/null)
+        --output text)
     
-    if [ -n "$INVESTIGATION_GROUP_ARN" ] && [ "$INVESTIGATION_GROUP_ARN" != "None" ]; then
+    if [ -n "$INVESTIGATION_GROUP_ARN" ] && [ "$INVESTIGATION_GROUP_ARN" != "None" ] && [ "$INVESTIGATION_GROUP_ARN" != "null" ]; then
         echo -e "${GREEN}✓ Investigation Group created${NC}"
     else
         echo -e "${RED}✗ Failed to create Investigation Group${NC}"
