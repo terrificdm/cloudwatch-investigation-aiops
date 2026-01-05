@@ -1,12 +1,23 @@
 #!/bin/bash
 set -e
 
+# Disable AWS CLI pager to prevent interactive prompts
+export AWS_PAGER=""
+
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
 STACK_NAME="cw-investigations-demo"
-REGION="${AWS_REGION:-us-east-1}"
+
+# Determine region: AWS_REGION env var > AWS CLI default region > us-east-1
+if [ -n "$AWS_REGION" ]; then
+    REGION="$AWS_REGION"
+elif [ -n "$(aws configure get region 2>/dev/null)" ]; then
+    REGION="$(aws configure get region)"
+else
+    REGION="us-east-1"
+fi
 
 echo -e "${YELLOW}Stopping slow query load...${NC}"
 
