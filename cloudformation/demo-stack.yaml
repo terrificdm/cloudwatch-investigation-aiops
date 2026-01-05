@@ -27,6 +27,25 @@ Parameters:
     Description: S3 key for EC2 application code
 
 Resources:
+  # ==================== API Gateway CloudWatch Logs Role ====================
+  ApiGatewayCloudWatchLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchLogsRole.Arn
+
   # ==================== VPC and Networking ====================
   DemoVPC:
     Type: AWS::EC2::VPC
@@ -636,6 +655,7 @@ Resources:
 
   DemoAPIStage:
     Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
     Properties:
       RestApiId: !Ref DemoAPI
       DeploymentId: !Ref DemoAPIDeployment
