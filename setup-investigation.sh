@@ -82,6 +82,16 @@ fi
 echo -e "  ARN: ${INVESTIGATION_GROUP_ARN}"
 echo ""
 
+# Update Investigation Group to use correct role ARN
+echo -e "${YELLOW}Updating Investigation Group role ARN...${NC}"
+aws aiops update-investigation-group \
+    --identifier "$INVESTIGATION_GROUP_ARN" \
+    --role-arn "$INVESTIGATION_ROLE_ARN" \
+    --region $REGION
+
+echo -e "${GREEN}✓ Investigation Group role updated${NC}"
+echo ""
+
 # Create Investigation Group policy
 echo -e "${YELLOW}Creating Investigation Group policy...${NC}"
 aws aiops put-investigation-group-policy \

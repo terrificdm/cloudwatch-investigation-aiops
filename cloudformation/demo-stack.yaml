@@ -264,8 +264,15 @@ Resources:
             Principal:
               Service: aiops.amazonaws.com
             Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:aiops:${AWS::Region}:${AWS::AccountId}:*'
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AIOpsAssistantPolicy
+        - arn:aws:iam::aws:policy/AIOpsAssistantIncidentReportPolicy
+        - arn:aws:iam::aws:policy/AmazonRDSPerformanceInsightsFullAccess
       Tags:
         - Key: Name
           Value: cw-demo-investigation-role
