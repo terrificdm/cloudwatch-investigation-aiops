@@ -79,7 +79,7 @@ User Requests → API Gateway → Lambda API → RDS MySQL
 
 ### 前置条件
 - AWS CLI 已配置，有管理员权限
-- 区域: us-east-1 或 us-west-2  
+- 区域: us-east-1 其他支持 CloudWatch Investigations 的区域
 
 ### 部署步骤
 
@@ -301,3 +301,5 @@ us-east-1 | us-west-2
 | 报告生成 | ✅ | ✅ |
 
 ---  
+
+> 注：该 Repo 所有内容及代码全部由 Kiro 生成。
