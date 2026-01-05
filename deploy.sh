@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Disable AWS CLI pager to prevent interactive prompts
+export AWS_PAGER=""
+
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -11,7 +14,15 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 STACK_NAME="cw-investigations-demo"
-REGION="${AWS_REGION:-us-east-1}"
+
+# Determine region: AWS_REGION env var > AWS CLI default region > us-east-1
+if [ -n "$AWS_REGION" ]; then
+    REGION="$AWS_REGION"
+elif [ -n "$(aws configure get region 2>/dev/null)" ]; then
+    REGION="$(aws configure get region)"
+else
+    REGION="us-east-1"
+fi
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}CloudWatch Investigations Demo Deployment${NC}"
@@ -73,9 +84,9 @@ BUCKET_NAME="cw-investigations-demo-${ACCOUNT_ID}-${REGION}"
 if ! aws s3 ls "s3://${BUCKET_NAME}" > /dev/null 2>&1; then
     echo -e "${YELLOW}Creating S3 bucket for Lambda code...${NC}"
     if [ "$REGION" == "us-east-1" ]; then
-        aws s3 mb "s3://${BUCKET_NAME}" --region $REGION
+        aws s3 mb "s3://${BUCKET_NAME}" --region $REGION > /dev/null
     else
-        aws s3 mb "s3://${BUCKET_NAME}" --region $REGION --create-bucket-configuration LocationConstraint=$REGION
+        aws s3api create-bucket --bucket "${BUCKET_NAME}" --region $REGION --create-bucket-configuration LocationConstraint=$REGION > /dev/null
     fi
     echo -e "${GREEN}✓ Created S3 bucket${NC}"
 else
